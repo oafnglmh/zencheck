@@ -333,6 +333,52 @@ def main():
     }
     write_json_and_js(index_path, index, js_prefix="window.__DATA_MANIFEST__ = ", pretty=True)
 
+    # Xuất danh sách tên người học phục vụ gợi ý tức thì (autocomplete)
+    names_set = set()
+    for e in entries:
+        json_abs = os.path.join(out, e["path"])
+        if os.path.isfile(json_abs):
+            try:
+                with open(json_abs, "r", encoding="utf-8") as f:
+                    doc = json.load(f)
+                    name_idx = next((i for i, c in enumerate(doc.get("columns", [])) if "họ" in c.lower()), -1)
+                    if name_idx != -1:
+                        for r in doc.get("rows", []):
+                            if name_idx < len(r):
+                                nm = r[name_idx].strip()
+                                if nm and len(nm) >= 2:
+                                    names_set.add(nm)
+            except Exception:
+                pass
+    names_list = sorted(list(names_set))
+    names_json = os.path.join(out, "names.json")
+    write_json_and_js(names_json, names_list, js_prefix="window.__NAMES__ = ")
+    print(f"Danh sách tên gợi ý: {len(names_list)} tên")
+
+    # Tạo 1 file gộp duy nhất (bundle) chứa toàn bộ dữ liệu 620 file
+    # Giúp nạp tức thì 1 lần duy nhất (~0.1s), F5 là chạy ngay, không gửi 620 request lẻ tẻ
+    bundle_docs = []
+    for e in entries:
+        json_abs = os.path.join(out, e["path"])
+        if os.path.isfile(json_abs):
+            try:
+                with open(json_abs, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    bundle_docs.append({
+                        "id": d["id"],
+                        "fileName": d["fileName"],
+                        "group": d["group"],
+                        "title": d.get("title", ""),
+                        "columns": d["columns"],
+                        "rows": d["rows"],
+                    })
+            except Exception:
+                pass
+
+    bundle_path = os.path.join(out, "bundle.json")
+    write_json_and_js(bundle_path, bundle_docs, js_prefix="window.__DATA_BUNDLE__ = ")
+    print(f"Đã tạo file bundle tổng hợp ({len(bundle_docs)} file)")
+
     print("-" * 60)
     print(f"Tổng số file Excel : {total}")
     print(f"Đọc mới / cập nhật : {parsed}")

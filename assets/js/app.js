@@ -1,30 +1,29 @@
 /* =========================================================================
- * Tra cứu dữ liệu văn bằng – web tĩnh (HTML/CSS/JS thuần)
- * Đọc data/index.json (danh sách file) và data/files/**.json (từng file Excel)
+ * Tra cứu văn bằng - CCE (Giao diện tối giản phong cách tìm kiếm Google)
  * ========================================================================= */
 (() => {
   'use strict';
 
   const DATA_DIR = 'data/';
-  const PAGE_SIZE = 50;
-  const ANY_COL = '*';          // tìm trong tất cả cột
-  const FILE_COL = '__file';    // tìm theo tên file
-  const GROUP_COL = '__group';  // năm / thư mục
+  const PAGE_SIZE = 15;
   const NAME_COL = 'Họ, chữ đệm và tên';
-  const MAIN_COLS = [
-    'Họ, chữ đệm và tên', 'Ngày, tháng, năm sinh', 'Số hiệu bằng',
-    'Số vào sổ gốc cấp văn bằng', 'Ngành đào tạo', 'Xếp loại tốt nghiệp',
-  ];
-  const NOWRAP_COLS = new Set(['STT', 'Ngày, tháng, năm sinh', 'Số hiệu bằng', 'Số vào sổ gốc cấp văn bằng',
-    'Số định danh cá nhân', 'Giới tính', 'Ngày tháng năm cấp bằng', 'Niên khóa', NAME_COL]);
 
   const app = document.getElementById('app');
+  const headerBrand = document.getElementById('header-brand');
+  const headerSearch = document.getElementById('header-search');
+  const headerStat = document.getElementById('header-stat');
+  const miniForm = document.getElementById('mini-search-form');
+  const miniInput = document.getElementById('mini-search-input');
+  const miniSuggest = document.getElementById('mini-suggest-box');
+
   const state = {
     manifest: null,
+    names: [],
+    namesFold: [],
     byId: new Map(),
     docs: new Map(),
     pending: new Map(),
-    lastHomeHash: '#/',
+    pendingScripts: new Map(),
     seq: 0,
   };
 
@@ -36,14 +35,7 @@
   const fold = (s) => String(s).toLowerCase().normalize('NFD').replace(MARKS, '').replace(/đ/g, 'd');
   const padDates = (s) => s.replace(/(^|\D)(\d{1,2})([/.-])(\d{1,2})\3(\d{4})(?!\d)/g,
     (m, pre, d, sep, mo, y) => `${pre}${d.padStart(2, '0')}/${mo.padStart(2, '0')}/${y}`);
-  /** Chuẩn hoá để so khớp: chữ thường, (bỏ dấu), gộp khoảng trắng, ngày dạng dd/mm/yyyy */
-  const norm = (s, accent) => padDates(accent ? String(s).normalize('NFC').toLowerCase() : fold(s))
-    .replace(/\s+/g, ' ').trim();
-
-  function debounce(fn, ms) {
-    let t;
-    return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
-  }
+  const norm = (s) => padDates(fold(s)).replace(/\s+/g, ' ').trim();
 
   function toast(msg) {
     const el = document.getElementById('toast');
@@ -64,17 +56,16 @@
       document.execCommand('copy');
       ta.remove();
     }
-    toast('Đã sao chép vào clipboard');
+    toast('Đã sao chép vào bộ nhớ tạm');
   }
 
-  /** Bôi vàng các từ khoá trong text (không phân biệt dấu nếu accent=false) */
-  function highlight(text, terms, accent) {
+  function highlight(text, terms) {
     text = String(text ?? '');
     if (!text || !terms || !terms.length) return esc(text);
     let folded = '';
     const map = [];
     for (let i = 0; i < text.length; i++) {
-      const f = accent ? text[i].toLowerCase() : fold(text[i]);
+      const f = fold(text[i]);
       for (let k = 0; k < f.length; k++) { folded += f[k]; map.push(i); }
     }
     const ranges = [];
@@ -112,41 +103,37 @@
     return { path, params };
   }
 
-  function buildHash(path, params) {
+  function setHash(path, params) {
     const qs = params.toString();
-    return '#' + path + (qs ? '?' + qs : '');
+    location.hash = '#' + path + (qs ? '?' + qs : '');
   }
 
   function replaceHash(path, params) {
-    history.replaceState(null, '', buildHash(path, params));
-    if (path === '/') state.lastHomeHash = location.hash;
+    const qs = params.toString();
+    history.replaceState(null, '', '#' + path + (qs ? '?' + qs : ''));
   }
 
   /* ------------------------------------------------------------ data load */
-  // Hỗ trợ cả file:// (bấm đúp index.html) và http://
-  const pendingScripts = new Map();
-
   function loadScript(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src = src;
       s.charset = 'utf-8';
       s.onload = () => { s.remove(); resolve(); };
-      s.onerror = (e) => { s.remove(); reject(new Error('Failed to load script: ' + src)); };
+      s.onerror = () => { s.remove(); reject(new Error('Failed to load script: ' + src)); };
       document.head.appendChild(s);
     });
   }
 
-  // Hook nhận dữ liệu file khi chạy offline bằng thẻ script
   window.__LOAD_FILE__ = function (doc) {
     if (doc && doc.id) {
       const entry = state.byId.get(doc.id);
       if (entry) doc.entry = entry;
       initDoc(doc);
       state.docs.set(doc.id, doc);
-      const res = pendingScripts.get(doc.id);
+      const res = state.pendingScripts.get(doc.id);
       if (res) {
-        pendingScripts.delete(doc.id);
+        state.pendingScripts.delete(doc.id);
         res.resolve(doc);
       }
     }
@@ -155,21 +142,18 @@
   function initDoc(doc) {
     doc.colIndex = Object.create(null);
     doc.columns.forEach((c, i) => { doc.colIndex[c] = i; });
-    doc.fileNorm = { false: norm(doc.name, false), true: norm(doc.name, true) };
-    doc.prep = {};
+    const stt = doc.colIndex.STT;
+    const cells = doc.rows.map((r) => r.map((v) => (v ? norm(v) : '')));
+    const all = cells.map((r) => r.filter((v, i) => v && i !== stt).join(' \u0001 '));
+    doc.prep = { cells, all };
   }
 
   async function loadManifest() {
-    // Nếu mở qua file:// hoặc đã được nạp sẵn index.js
-    if (window.__DATA_MANIFEST__) {
-      return onManifestLoaded(window.__DATA_MANIFEST__);
-    }
+    if (window.__DATA_MANIFEST__) return onManifestLoaded(window.__DATA_MANIFEST__);
 
     if (location.protocol === 'file:') {
       await loadScript(DATA_DIR + 'index.js');
-      if (window.__DATA_MANIFEST__) {
-        return onManifestLoaded(window.__DATA_MANIFEST__);
-      }
+      if (window.__DATA_MANIFEST__) return onManifestLoaded(window.__DATA_MANIFEST__);
     }
 
     try {
@@ -177,13 +161,10 @@
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const m = await res.json();
       return onManifestLoaded(m);
-    } catch (e) {
-      // Fallback sang index.js qua script tag nếu fetch bị chặn
+    } catch {
       await loadScript(DATA_DIR + 'index.js');
-      if (window.__DATA_MANIFEST__) {
-        return onManifestLoaded(window.__DATA_MANIFEST__);
-      }
-      throw e;
+      if (window.__DATA_MANIFEST__) return onManifestLoaded(window.__DATA_MANIFEST__);
+      throw new Error('Không đọc được dữ liệu index');
     }
   }
 
@@ -196,6 +177,40 @@
     return m;
   }
 
+  async function loadNames() {
+    if (state.names.length) return state.names;
+    if (window.__NAMES__) return setNames(window.__NAMES__);
+
+    if (location.protocol === 'file:') {
+      try {
+        await loadScript(DATA_DIR + 'names.js');
+        if (window.__NAMES__) return setNames(window.__NAMES__);
+      } catch (e) {
+        console.warn('Could not load names.js via script tag', e);
+      }
+    }
+
+    try {
+      const res = await fetch(DATA_DIR + 'names.json');
+      if (res.ok) {
+        const list = await res.json();
+        return setNames(list);
+      }
+    } catch {
+      try {
+        await loadScript(DATA_DIR + 'names.js');
+        if (window.__NAMES__) return setNames(window.__NAMES__);
+      } catch { }
+    }
+    return [];
+  }
+
+  function setNames(list) {
+    state.names = list;
+    state.namesFold = list.map((n) => fold(n));
+    return list;
+  }
+
   function loadDoc(entry) {
     if (state.docs.has(entry.id)) return Promise.resolve(state.docs.get(entry.id));
     if (state.pending.has(entry.id)) return state.pending.get(entry.id);
@@ -204,13 +219,12 @@
     let p;
 
     if (isFileProto) {
-      // Nạp qua script tag (offline không bị chặn CORS)
       const jsRel = entry.path.replace(/\.json$/, '.js');
       const scriptUrl = DATA_DIR + jsRel.split('/').map(encodeURIComponent).join('/');
       p = new Promise((resolve, reject) => {
-        pendingScripts.set(entry.id, { resolve, reject });
+        state.pendingScripts.set(entry.id, { resolve, reject });
         loadScript(scriptUrl).catch((err) => {
-          pendingScripts.delete(entry.id);
+          state.pendingScripts.delete(entry.id);
           reject(err);
         });
       });
@@ -231,61 +245,79 @@
     return p;
   }
 
-  async function loadMany(entries, onProgress) {
+  async function loadAllDocs(onProgress) {
+    if (state.docs.size >= state.manifest.files.length) return;
+
+    // Ưu tiên nạp 1 file bundle gộp duy nhất (nhanh gấp 50 lần nạp 620 file lẻ)
+    if (window.__DATA_BUNDLE__) {
+      initBundle(window.__DATA_BUNDLE__);
+      if (onProgress) onProgress(state.manifest.files.length, state.manifest.files.length);
+      return;
+    }
+
+    if (location.protocol === 'file:') {
+      try {
+        await loadScript(DATA_DIR + 'bundle.js');
+        if (window.__DATA_BUNDLE__) {
+          initBundle(window.__DATA_BUNDLE__);
+          if (onProgress) onProgress(state.manifest.files.length, state.manifest.files.length);
+          return;
+        }
+      } catch (e) {
+        console.warn('Could not load bundle.js via script tag', e);
+      }
+    }
+
+    try {
+      const res = await fetch(DATA_DIR + 'bundle.json');
+      if (res.ok) {
+        const bundle = await res.json();
+        initBundle(bundle);
+        if (onProgress) onProgress(state.manifest.files.length, state.manifest.files.length);
+        return;
+      }
+    } catch {
+      try {
+        await loadScript(DATA_DIR + 'bundle.js');
+        if (window.__DATA_BUNDLE__) {
+          initBundle(window.__DATA_BUNDLE__);
+          if (onProgress) onProgress(state.manifest.files.length, state.manifest.files.length);
+          return;
+        }
+      } catch { }
+    }
+
+    // Fallback: Nếu không có bundle thì nạp song song từng file như cũ
+    const entries = state.manifest.files;
     const todo = entries.filter((e) => !state.docs.has(e.id));
     let done = entries.length - todo.length;
-    const failed = [];
-    onProgress(done, entries.length);
+    if (onProgress) onProgress(done, entries.length);
     let i = 0;
     const worker = async () => {
       while (i < todo.length) {
         const e = todo[i++];
-        try { await loadDoc(e); } catch (err) { failed.push(e); console.error(e.path, err); }
+        try { await loadDoc(e); } catch (err) { console.error(e.path, err); }
         done++;
-        onProgress(done, entries.length);
+        if (onProgress) onProgress(done, entries.length);
       }
     };
     await Promise.all(Array.from({ length: Math.min(8, todo.length) }, worker));
-    return failed;
   }
 
-  /** Dữ liệu đã chuẩn hoá của 1 file (tính 1 lần, dùng lại) */
-  function prepared(doc, accent) {
-    const key = accent ? 'a' : 'n';
-    if (doc.prep[key]) return doc.prep[key];
-    const stt = doc.colIndex.STT;
-    const cells = doc.rows.map((r) => r.map((v) => (v ? norm(v, accent) : '')));
-    const all = cells.map((r) => r.filter((v, i) => v && i !== stt).join(' \u0001 '));
-    doc.prep[key] = { cells, all };
-    return doc.prep[key];
+  function initBundle(bundle) {
+    bundle.forEach((doc) => {
+      const entry = state.byId.get(doc.id);
+      if (entry) doc.entry = entry;
+      initDoc(doc);
+      state.docs.set(doc.id, doc);
+    });
   }
 
-  /* ------------------------------------------------------------- searching */
-  function readQuery(params) {
-    const qs = params.getAll('q');
-    const cs = params.getAll('c');
-    const conds = qs.map((q, i) => ({ c: cs[i] || ANY_COL, q }));
-    return {
-      conds,
-      exact: params.get('exact') === '1',
-      word: params.get('word') === '1',
-      accent: params.get('accent') === '1',
-    };
-  }
-
-  function compile(query) {
-    return query.conds
-      .filter((c) => c.q.trim())
-      .map((c) => {
-        const phrase = norm(c.q, query.accent);
-        return { col: c.c, phrase, tokens: phrase.split(' ').filter(Boolean) };
-      });
-  }
-
+  /* ------------------------------------------------------------- search */
   const WORD_CH = /[\p{L}\p{N}]/u;
   const isWordCh = (ch) => !!ch && WORD_CH.test(ch);
   const wordAt = (hay, i, len) => !isWordCh(hay[i - 1]) && !isWordCh(hay[i + len]);
-  /** t xuất hiện trong hay như một từ trọn vẹn */
+
   function wordHit(hay, t) {
     let p = hay.indexOf(t);
     while (p !== -1) {
@@ -294,660 +326,430 @@
     }
     return false;
   }
-  const subHit = (hay, t) => hay.includes(t);
 
-  /** Mức độ phù hợp của 1 ô với 1 điều kiện (để xếp hạng kết quả) */
-  function cellScore(hay, c) {
-    if (!hay) return 0;
-    if (hay === c.phrase) return 1000;
-    let s = 0;
-    const pi = hay.indexOf(c.phrase);
-    if (pi !== -1) s += wordAt(hay, pi, c.phrase.length) ? 300 : 100;
-    if (pi === 0) s += 20;
-    for (const t of c.tokens) {
-      if (wordHit(hay, t)) s += 10;
-      else if (hay.includes(t)) s += 3;
-    }
-    return s;
-  }
+  function search(queryStr) {
+    const phrase = norm(queryStr);
+    const tokens = phrase.split(' ').filter(Boolean);
+    if (!tokens.length) return { results: [], tokens: [] };
 
-  /** Trả về điểm phù hợp (>0) nếu dòng thỏa mọi điều kiện, ngược lại 0 */
-  function matchRow(doc, i, prep, cq, query) {
-    const { exact } = query;
-    const hit = query.word ? wordHit : subHit;
-    let score = 1;
-    for (const c of cq) {
-      if (c.col === FILE_COL) {
-        const hay = doc.fileNorm[query.accent];
-        if (!(exact ? hay === c.phrase : c.tokens.every((t) => hit(hay, t)))) return 0;
-      } else if (c.col === ANY_COL) {
-        const cells = prep.cells[i];
-        if (exact) {
-          if (!cells.includes(c.phrase)) return 0;
-          score += 1000;
-        } else {
-          if (!c.tokens.every((t) => hit(prep.all[i], t))) return 0;
-          let best = 0;
-          for (const v of cells) { if (v) best = Math.max(best, cellScore(v, c)); }
-          score += best;
-        }
-      } else {
-        const idx = doc.colIndex[c.col];
-        if (idx === undefined) return 0;
-        const hay = prep.cells[i][idx] || '';
-        if (!(exact ? hay === c.phrase : c.tokens.every((t) => hit(hay, t)))) return 0;
-        score += cellScore(hay, c);
-      }
-    }
-    return score;
-  }
+    const results = [];
+    const docs = state.manifest.files.map((f) => state.docs.get(f.id)).filter(Boolean);
 
-  function searchDocs(docs, query) {
-    const cq = compile(query);
-    const out = [];
     for (const doc of docs) {
-      if (!cq.length) {
-        for (let i = 0; i < doc.rows.length; i++) out.push({ doc, i });
-        continue;
-      }
-      const prep = prepared(doc, query.accent);
+      const { cells, all } = doc.prep;
+      const nameIdx = doc.colIndex[NAME_COL];
       for (let i = 0; i < doc.rows.length; i++) {
-        const s = matchRow(doc, i, prep, cq, query);
-        if (s) out.push({ doc, i, s });
+        const line = all[i] + ' \u0001 ' + norm(doc.group) + ' \u0001 ' + norm(doc.fileName);
+        if (!tokens.every((t) => line.includes(t))) continue;
+
+        // Tính điểm ưu tiên
+        let score = 1;
+        const nameVal = nameIdx !== undefined ? cells[i][nameIdx] : '';
+        if (nameVal === phrase) score += 1000;
+        else if (nameVal && nameVal.includes(phrase)) score += 400;
+        else if (line.includes(phrase)) score += 200;
+
+        for (const t of tokens) {
+          if (nameVal && wordHit(nameVal, t)) score += 50;
+          else if (wordHit(line, t)) score += 10;
+        }
+
+        results.push({ doc, i, score });
       }
     }
-    // Xếp hạng: khớp đúng cả ô > khớp cụm từ > khớp nguyên từ > khớp một phần
-    if (cq.length) out.sort((a, b) => b.s - a.s);
-    return out;
+
+    results.sort((a, b) => b.score - a.score);
+    return { results, tokens };
   }
 
-  /** Từ khoá cần bôi vàng theo từng cột */
-  function termsFor(query) {
-    const cq = compile(query);
-    const any = [];
-    const byCol = {};
-    for (const c of cq) {
-      const terms = query.exact ? [c.phrase] : c.tokens;
-      if (c.col === ANY_COL) any.push(...terms);
-      else (byCol[c.col] = byCol[c.col] || []).push(...terms);
+  /* ----------------------------------------------------- autocomplete */
+  function getSuggestions(val, limit = 15) {
+    val = fold(val.trim());
+    if (!val) return [];
+    const tokens = val.split(/\s+/).filter(Boolean);
+    const matches = [];
+
+    // Ưu tiên 1: Tên bắt đầu bằng từ khóa
+    // Ưu tiên 2: Tên chứa từ khóa
+    const starts = [];
+    const contains = [];
+
+    for (let i = 0; i < state.names.length; i++) {
+      const f = state.namesFold[i];
+      if (tokens.every((t) => f.includes(t))) {
+        if (f.startsWith(val)) {
+          starts.push(state.names[i]);
+          if (starts.length >= limit) break;
+        } else {
+          if (contains.length < limit) contains.push(state.names[i]);
+        }
+      }
     }
-    return (col) => any.concat(byCol[col] || []);
+
+    return [...starts, ...contains].slice(0, limit);
   }
 
-  function cellValue(doc, i, col) {
-    if (col === FILE_COL) return doc.name;
-    if (col === GROUP_COL) return doc.group;
-    const idx = doc.colIndex[col];
-    return idx === undefined ? '' : (doc.rows[i][idx] || '');
-  }
+  function bindAutocomplete(inputEl, boxEl, wrapEl, onSelect) {
+    let activeIdx = -1;
+    let currentItems = [];
 
-  function sortKey(v) {
-    const s = String(v).trim();
-    const d = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
-    if (d) return { n: +(d[3] + d[2].padStart(2, '0') + d[1].padStart(2, '0')) };
-    if (/^-?\d+(\.\d+)?$/.test(s)) return { n: parseFloat(s) };
-    return { s };
-  }
+    const close = () => {
+      boxEl.hidden = true;
+      boxEl.innerHTML = '';
+      if (wrapEl) wrapEl.classList.remove('has-suggest');
+      activeIdx = -1;
+      currentItems = [];
+    };
 
-  function sortResults(results, col, dir) {
-    if (!col) return results;
-    const mul = dir === 'desc' ? -1 : 1;
-    const collator = new Intl.Collator('vi', { sensitivity: 'base', numeric: true });
-    const keyed = results.map((r) => ({ r, k: sortKey(cellValue(r.doc, r.i, col)) }));
-    keyed.sort((a, b) => {
-      const ea = a.k.s === '' ;
-      const eb = b.k.s === '';
-      if (ea !== eb) return ea ? 1 : -1; // ô trống luôn ở cuối
-      if (a.k.n !== undefined && b.k.n !== undefined) return (a.k.n - b.k.n) * mul;
-      return collator.compare(a.k.s ?? String(a.k.n), b.k.s ?? String(b.k.n)) * mul;
-    });
-    return keyed.map((x) => x.r);
-  }
+    const render = (items) => {
+      currentItems = items;
+      activeIdx = -1;
+      if (!items.length) {
+        close();
+        return;
+      }
+      const val = inputEl.value.trim();
+      const tokens = fold(val).split(/\s+/).filter(Boolean);
 
-  /* ----------------------------------------------------------- components */
-  function colOptions(columns, selected, withFile) {
-    const opts = [`<option value="${ANY_COL}">Tất cả các cột</option>`];
-    if (withFile) opts.push(`<option value="${FILE_COL}">Tên file Excel</option>`);
-    opts.push('<optgroup label="Theo cột">');
-    columns.forEach((c) => opts.push(`<option value="${esc(c)}">${esc(c)}</option>`));
-    opts.push('</optgroup>');
-    const html = opts.join('');
-    return selected ? html.replace(`value="${esc(selected)}"`, `value="${esc(selected)}" selected`) : html;
-  }
-
-  function condHTML(columns, withFile, cond, first) {
-    return `<div class="cond${first ? ' first' : ''}">
-      <select title="Chọn cột cần tìm">${colOptions(columns, cond.c, withFile)}</select>
-      <div class="q-wrap"><input type="search" value="${esc(cond.q)}"
-        placeholder="${first ? 'Nhập họ tên, số hiệu bằng, số định danh, ngày sinh (dd/mm/yyyy)...' : 'Nhập giá trị cần tìm...'}"></div>
-      ${first ? '' : '<button type="button" class="btn-close" data-act="remove" title="Bỏ điều kiện này"></button>'}
-    </div>`;
-  }
-
-  function searchFormHTML(opts) {
-    const { columns, withFile, query, groups, group } = opts;
-    const conds = query.conds.length ? query.conds : [{ c: ANY_COL, q: '' }];
-    const groupChips = groups ? `
-      <div class="search-actions">
-        <span class="check" style="cursor:default">Phạm vi năm:</span>
-        <div class="chips" data-role="groups">
-          <button type="button" class="chip${!group ? ' active' : ''}" data-group="">Tất cả</button>
-          ${groups.map((g) => `<button type="button" class="chip${g.name === group ? ' active' : ''}" data-group="${esc(g.name)}">${esc(g.name)}<small>${fmtNum(g.count)}</small></button>`).join('')}
+      boxEl.innerHTML = items.map((item, idx) => `
+        <div class="suggest-item" data-idx="${idx}">
+          <span class="suggest-icon"></span>
+          <span class="suggest-text">${highlight(item, tokens)}</span>
         </div>
-      </div>` : '';
-    return `<form class="search-form" autocomplete="off">
-      <div class="conds">${conds.map((c, i) => condHTML(columns, withFile, c, i === 0)).join('')}</div>
-      <div class="search-actions">
-        <button type="button" class="btn btn-ghost btn-sm" data-act="add">+ Thêm điều kiện</button>
-        <label class="check" title="vd. tìm &quot;hoa&quot; sẽ không ra &quot;Hoàng&quot;, &quot;Thoa&quot;"><input type="checkbox" name="word"${query.word ? ' checked' : ''}> Khớp nguyên từ</label>
-        <label class="check" title="Giá trị của ô phải giống hệt nội dung tìm"><input type="checkbox" name="exact"${query.exact ? ' checked' : ''}> Khớp chính xác cả ô</label>
-        <label class="check"><input type="checkbox" name="accent"${query.accent ? ' checked' : ''}> Phân biệt dấu</label>
-        <span class="spacer"></span>
-        <button type="button" class="btn btn-sm" data-act="clear">Xóa tìm kiếm</button>
-        <button type="submit" class="btn btn-primary">Tìm kiếm</button>
-      </div>
-      ${groupChips}
-      <div class="hint">Mẹo: gõ không dấu vẫn tìm được (vd. <code>nguyen thi hoa</code>). Các từ được tìm độc lập, kết quả phải chứa đủ các từ.
-        Có thể thêm nhiều điều kiện (vd. Họ tên + Năm sinh) - kết quả phải thỏa tất cả điều kiện.</div>
-    </form>`;
-  }
+      `).join('');
 
-  /** Gắn sự kiện cho form tìm kiếm; onChange(query, immediate) */
-  function bindSearchForm(form, columns, withFile, onChange) {
-    const read = () => ({
-      conds: [...form.querySelectorAll('.cond')].map((el) => ({
-        c: el.querySelector('select').value,
-        q: el.querySelector('input').value,
-      })),
-      exact: form.elements.exact.checked,
-      word: form.elements.word.checked,
-      accent: form.elements.accent.checked,
+      boxEl.hidden = false;
+      if (wrapEl) wrapEl.classList.add('has-suggest');
+    };
+
+    inputEl.addEventListener('input', () => {
+      const q = inputEl.value;
+      if (!q.trim()) {
+        close();
+        return;
+      }
+      const list = getSuggestions(q, 8);
+      render(list);
     });
-    const live = debounce(() => onChange(read(), false), 280);
-    form.addEventListener('input', (e) => { if (e.target.matches('input[type=search]')) live(); });
-    form.addEventListener('change', (e) => { if (!e.target.matches('input[type=search]')) onChange(read(), true); });
-    form.addEventListener('submit', (e) => { e.preventDefault(); onChange(read(), true); });
-    form.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-act]');
-      if (!btn) return;
-      const act = btn.dataset.act;
-      if (act === 'add') {
-        form.querySelector('.conds').insertAdjacentHTML('beforeend',
-          condHTML(columns, withFile, { c: columns.includes(NAME_COL) ? NAME_COL : ANY_COL, q: '' }, false));
-        form.querySelector('.cond:last-child input').focus();
-      } else if (act === 'remove') {
-        btn.closest('.cond').remove();
-        onChange(read(), true);
-      } else if (act === 'clear') {
-        form.querySelectorAll('.cond:not(.first)').forEach((el) => el.remove());
-        const first = form.querySelector('.cond.first');
-        first.querySelector('input').value = '';
-        first.querySelector('select').value = ANY_COL;
-        onChange(read(), true);
-        first.querySelector('input').focus();
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (boxEl.hidden || !currentItems.length) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIdx = (activeIdx + 1) % currentItems.length;
+        updateActive();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIdx = (activeIdx - 1 + currentItems.length) % currentItems.length;
+        updateActive();
+      } else if (e.key === 'Enter') {
+        if (activeIdx >= 0 && activeIdx < currentItems.length) {
+          e.preventDefault();
+          select(currentItems[activeIdx]);
+        }
+      } else if (e.key === 'Escape') {
+        close();
+      }
+    });
+
+    function updateActive() {
+      const els = boxEl.querySelectorAll('.suggest-item');
+      els.forEach((el, idx) => {
+        el.classList.toggle('active', idx === activeIdx);
+        if (idx === activeIdx) {
+          el.scrollIntoView({ block: 'nearest' });
+        }
+      });
+      if (activeIdx >= 0) {
+        inputEl.value = currentItems[activeIdx];
+      }
+    }
+
+    function select(name) {
+      inputEl.value = name;
+      close();
+      onSelect(name);
+    }
+
+    boxEl.addEventListener('mousedown', (e) => {
+      const item = e.target.closest('.suggest-item');
+      if (!item) return;
+      const idx = +item.dataset.idx;
+      select(currentItems[idx]);
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!boxEl.contains(e.target) && e.target !== inputEl) {
+        close();
       }
     });
   }
 
-  function queryToParams(params, query) {
-    params.delete('q');
-    params.delete('c');
-    query.conds.filter((c) => c.q.trim() || c.c !== ANY_COL).forEach((c) => {
-      params.append('q', c.q);
-      params.append('c', c.c);
+  /* ------------------------------------------------------------- views */
+  function renderHome() {
+    headerBrand.hidden = true;
+    headerSearch.hidden = true;
+    document.querySelector('.app-header').classList.remove('has-border');
+    document.title = 'Tra cứu văn bằng - CCE';
+
+    app.innerHTML = `
+      <div class="home-center">
+        <div class="home-logo-wrap">
+          <img src="assets/logo.png" alt="CCE Logo" class="home-logo">
+          <h1 class="home-title">Tra cứu văn bằng</h1>
+          <p class="home-subtitle">Trung tâm Đào tạo Thường xuyên - Đại học Đà Nẵng</p>
+        </div>
+        <div class="search-box-wrap" id="home-search-wrap">
+          <form id="home-search-form" autocomplete="off">
+            <div class="search-bar">
+              <span class="search-icon-svg"></span>
+              <input type="search" id="home-search-input" autofocus autocomplete="off"
+                placeholder="Nhập họ tên, số hiệu bằng, số định danh...">
+            </div>
+            <div class="suggest-box" id="home-suggest-box" hidden></div>
+          </form>
+        </div>
+      </div>`;
+
+    const form = document.getElementById('home-search-form');
+    const input = document.getElementById('home-search-input');
+    const box = document.getElementById('home-suggest-box');
+    const wrap = document.getElementById('home-search-wrap');
+
+    const doSearch = (q) => {
+      q = q.trim();
+      if (q) setHash('/search', new URLSearchParams({ q }));
+    };
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      doSearch(input.value);
     });
-    query.exact ? params.set('exact', '1') : params.delete('exact');
-    query.word ? params.set('word', '1') : params.delete('word');
-    query.accent ? params.set('accent', '1') : params.delete('accent');
-    params.delete('page');
+
+    bindAutocomplete(input, box, wrap, (name) => {
+      doSearch(name);
+    });
   }
 
-  /**
-   * Vẽ bảng kết quả có sắp xếp + phân trang.
-   * cols: [{key,label,cls,render?}]
-   */
-  function renderTable(container, opts) {
-    const { results, cols, params, path, terms, accent, emptyHTML, showFile } = opts;
-    const sortCol = params.get('sort') || '';
-    const dir = params.get('dir') || 'asc';
-    const sorted = sortResults(results, sortCol, dir);
-    const total = sorted.length;
+  async function renderSearch(params) {
+    const q = params.get('q') || '';
+    if (!q.trim()) { setHash('/', new URLSearchParams()); return; }
+
+    headerBrand.hidden = false;
+    headerSearch.hidden = false;
+    document.querySelector('.app-header').classList.add('has-border');
+    miniInput.value = q;
+    document.title = `${q} - Tìm kiếm văn bằng`;
+
+    const seq = ++state.seq;
+
+    // Kiểm tra cần nạp dữ liệu không
+    const needLoad = state.manifest.files.some((f) => !state.docs.has(f.id));
+    if (needLoad) {
+      app.innerHTML = `
+        <div class="loading-state">
+          <div class="spinner"></div>
+          <p>Đang chuẩn bị dữ liệu (<span id="load-prog">0</span>/${fmtNum(state.manifest.totalFiles)} file)...</p>
+        </div>`;
+      await loadAllDocs((done, total) => {
+        if (seq !== state.seq) return;
+        const el = document.getElementById('load-prog');
+        if (el) el.textContent = fmtNum(done);
+      });
+      if (seq !== state.seq) return;
+    }
+
+    const t0 = performance.now();
+    const { results, tokens } = search(q);
+    const ms = Math.round(performance.now() - t0);
+
+    const total = results.length;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const page = Math.min(Math.max(1, +params.get('page') || 1), pages);
     const start = (page - 1) * PAGE_SIZE;
-    const slice = sorted.slice(start, start + PAGE_SIZE);
+    const slice = results.slice(start, start + PAGE_SIZE);
 
     if (!total) {
-      container.innerHTML = emptyHTML;
+      app.innerHTML = `
+        <div class="results-page">
+          <div class="results-meta">Khoảng 0 kết quả (${ms} mili-giây)</div>
+          <div class="empty-state">
+            <p>Không tìm thấy thông tin phù hợp với từ khóa: <b>${esc(q)}</b></p>
+            <p style="margin-top:8px;font-size:13px">Gợi ý: Kiểm tra lại chính tả, thử gõ không dấu hoặc thử nhập số hiệu bằng / số định danh.</p>
+          </div>
+        </div>`;
       return;
     }
 
-    const head = cols.map((c) => {
-      const sorted = c.key === sortCol;
-      const arrow = sorted ? (dir === 'asc' ? ' [tang]' : ' [giam]') : '';
-      return `<th class="${c.cls || ''}${sorted ? ' sorted' : ''}" data-sort="${esc(c.key)}" title="Bấm để sắp xếp">${esc(c.label)}<span class="sort">${arrow}</span></th>`;
+    const cards = slice.map((item, idx) => {
+      const { doc, i } = item;
+      const getVal = (col) => {
+        const ci = doc.colIndex[col];
+        return ci !== undefined ? (doc.rows[i][ci] || '') : '';
+      };
+
+      const name = getVal(NAME_COL) || 'Chưa rõ họ tên';
+      const dob = getVal('Ngày, tháng, năm sinh');
+      const soHieu = getVal('Số hiệu bằng');
+      const soVaoSo = getVal('Số vào sổ gốc cấp văn bằng');
+      const nganh = getVal('Ngành đào tạo');
+      const xepLoai = getVal('Xếp loại tốt nghiệp');
+      const cccd = getVal('Số định danh cá nhân');
+
+      const snippetParts = [];
+      if (dob) snippetParts.push(`<span>Ngày sinh: <b>${highlight(dob, tokens)}</b></span>`);
+      if (soHieu) snippetParts.push(`<span>Số bằng: <b>${highlight(soHieu, tokens)}</b></span>`);
+      if (soVaoSo) snippetParts.push(`<span>Số vào sổ: <b>${highlight(soVaoSo, tokens)}</b></span>`);
+      if (nganh) snippetParts.push(`<span>Ngành: <b>${highlight(nganh, tokens)}</b></span>`);
+      if (xepLoai) snippetParts.push(`<span>Xếp loại: <b>${highlight(xepLoai, tokens)}</b></span>`);
+      if (cccd) snippetParts.push(`<span>CCCD/Định danh: <b>${highlight(cccd, tokens)}</b></span>`);
+
+      return `
+        <article class="result-card" data-idx="${start + idx}">
+          <div class="result-file-source">
+            <span>Năm ${esc(doc.group)}</span>
+            <span class="sub">›</span>
+            <span class="sub">${esc(doc.fileName)}</span>
+          </div>
+          <div class="result-name-link">${highlight(name, tokens)}</div>
+          <div class="result-snippet">${snippetParts.join('')}</div>
+        </article>`;
     }).join('');
 
-    const body = slice.map((r, k) => {
-      const tds = cols.map((c) => {
-        if (c.key === '__idx') return `<td class="idx">${start + k + 1}</td>`;
-        const v = cellValue(r.doc, r.i, c.key);
-        let cls = c.cls || '';
-        if (NOWRAP_COLS.has(c.key)) cls += ' nowrap';
-        if (c.key === NAME_COL) cls += ' name-cell';
-        if (c.key === FILE_COL) cls += ' file-cell';
-        return `<td class="${cls}">${highlight(v, terms(c.key), accent)}</td>`;
-      }).join('');
-      return `<tr data-pos="${start + k}">${tds}</tr>`;
-    }).join('');
-
-    container.innerHTML = `
-      <div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
-      <div class="pager">
-        <span class="info">Hiển thị ${fmtNum(start + 1)}-${fmtNum(start + slice.length)} / ${fmtNum(total)} bản ghi - Bấm vào một dòng để xem chi tiết</span>
-        ${pagerHTML(page, pages)}
+    app.innerHTML = `
+      <div class="results-page">
+        <div class="results-meta">Khoảng ${fmtNum(total)} kết quả (${ms} mili-giây)</div>
+        <div class="results-list">${cards}</div>
+        ${paginationHTML(page, pages)}
       </div>`;
 
-    container.querySelector('thead').addEventListener('click', (e) => {
-      const th = e.target.closest('th[data-sort]');
-      if (!th || th.dataset.sort === '__idx') return;
-      const key = th.dataset.sort;
-      if (sortCol === key) {
-        if (dir === 'asc') params.set('dir', 'desc');
-        else { params.delete('sort'); params.delete('dir'); }
-      } else {
-        params.set('sort', key);
-        params.set('dir', 'asc');
-      }
-      params.delete('page');
-      replaceHash(path, params);
-      renderTable(container, opts);
+    app.querySelector('.results-list').addEventListener('click', (e) => {
+      const card = e.target.closest('.result-card');
+      if (!card) return;
+      const pos = +card.dataset.idx;
+      openModal(results, pos, tokens);
     });
-    container.querySelector('tbody').addEventListener('click', (e) => {
-      const tr = e.target.closest('tr[data-pos]');
-      if (tr) openRecord(sorted, +tr.dataset.pos, terms, accent, showFile);
-    });
-    container.querySelector('.pager').addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-page]');
-      if (!b || b.disabled) return;
-      params.set('page', b.dataset.page);
-      replaceHash(path, params);
-      renderTable(container, opts);
-      container.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+
+    const pag = app.querySelector('.pagination');
+    if (pag) {
+      pag.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-p]');
+        if (!btn || btn.disabled) return;
+        params.set('page', btn.dataset.p);
+        replaceHash('/search', params);
+        window.scrollTo(0, 0);
+        renderSearch(params);
+      });
+    }
   }
 
-  function pagerHTML(page, pages) {
+  function paginationHTML(page, pages) {
     if (pages <= 1) return '';
     const nums = new Set([1, pages, page - 2, page - 1, page, page + 1, page + 2]);
     const list = [...nums].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
-    let html = `<button data-page="${page - 1}" ${page === 1 ? 'disabled' : ''}>Trang trước</button>`;
+    let html = `<button data-p="${page - 1}" ${page === 1 ? 'disabled' : ''}>Trước</button>`;
     let prev = 0;
     for (const n of list) {
       if (n - prev > 1) html += '<button disabled>...</button>';
-      html += `<button data-page="${n}" class="${n === page ? 'active' : ''}">${n}</button>`;
+      html += `<button data-p="${n}" class="${n === page ? 'active' : ''}">${n}</button>`;
       prev = n;
     }
-    html += `<button data-page="${page + 1}" ${page === pages ? 'disabled' : ''}>Trang sau</button>`;
-    return `<div class="pages">${html}</div>`;
+    html += `<button data-p="${page + 1}" ${page === pages ? 'disabled' : ''}>Sau</button>`;
+    return `<div class="pagination">${html}</div>`;
   }
 
-  /* ---------------------------------------------------------------- modal */
+  /* ------------------------------------------------------------- modal */
   const modal = document.getElementById('modal');
-  let modalCtx = null;
+  let modalList = null;
+  let modalPos = 0;
+  let modalTokens = [];
 
-  function openRecord(list, pos, terms, accent, showFile) {
-    modalCtx = { list, pos, terms, accent, showFile, showEmpty: false };
-    drawRecord();
+  function openModal(list, pos, tokens) {
+    modalList = list;
+    modalPos = pos;
+    modalTokens = tokens;
+    drawModal();
     modal.hidden = false;
     document.body.style.overflow = 'hidden';
   }
 
-  function drawRecord() {
-    const { list, pos, terms, accent, showEmpty } = modalCtx;
-    const { doc, i } = list[pos];
-    const row = doc.rows[i];
-    const name = cellValue(doc, i, NAME_COL);
-    document.getElementById('modal-title').textContent = name || `Bản ghi #${i + 1}`;
-    const kv = doc.columns.map((c, idx) => {
-      const v = row[idx] || '';
-      if (!v && !showEmpty) return '';
-      return `<div class="k">${esc(c)}</div><div class="v${v ? '' : ' empty-v'}">${v ? highlight(v, terms(c), accent) : '(trống)'}</div>`;
-    }).join('');
+  function drawModal() {
+    const { doc, i } = modalList[modalPos];
+    const nameIdx = doc.colIndex[NAME_COL];
+    const name = nameIdx !== undefined ? doc.rows[i][nameIdx] : `Bản ghi #${i + 1}`;
+    document.getElementById('modal-title').textContent = name || 'Chi tiết';
+
+    const items = doc.columns.map((c, idx) => {
+      const v = doc.rows[i][idx] || '';
+      if (!v) return '';
+      return `<div class="detail-k">${esc(c)}</div><div class="detail-v">${highlight(v, modalTokens)}</div>`;
+    }).filter(Boolean).join('');
+
     document.getElementById('modal-body').innerHTML = `
-      <div class="kv">${kv}</div>
-      <div class="source-box">Nguồn: <b>${esc(doc.fileName)}</b> - Năm/thư mục: <b>${esc(doc.group)}</b> - Dòng dữ liệu thứ ${i + 1}
-        ${doc.title ? `<br><span style="color:var(--muted)">${esc(doc.title)}</span>` : ''}</div>`;
-    document.getElementById('modal-foot').innerHTML = `
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn-sm" data-m="prev" ${pos === 0 ? 'disabled' : ''}>Trước</button>
-        <span class="check" style="cursor:default">${fmtNum(pos + 1)} / ${fmtNum(list.length)}</span>
-        <button class="btn btn-sm" data-m="next" ${pos === list.length - 1 ? 'disabled' : ''}>Sau</button>
-        <label class="check"><input type="checkbox" data-m="empty" ${showEmpty ? 'checked' : ''}> Hiện cả trường trống</label>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-sm" data-m="copy">Sao chép</button>
-        ${modalCtx.showFile ? `<a class="btn btn-sm btn-primary" href="#/file/${encodeURIComponent(doc.id)}">Mở file này</a>` : ''}
+      <div class="detail-grid">${items}</div>
+      <div class="detail-source">
+        Nguồn: <b>${esc(doc.fileName)}</b> (Năm ${esc(doc.group)})
+        ${doc.title ? `<br>${esc(doc.title)}` : ''}
       </div>`;
+
+    document.getElementById('modal-foot').innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn-g" id="btn-m-prev" ${modalPos === 0 ? 'disabled' : ''}>Trước</button>
+        <span style="font-size:13px;color:var(--muted)">${fmtNum(modalPos + 1)} / ${fmtNum(modalList.length)}</span>
+        <button class="btn-g" id="btn-m-next" ${modalPos === modalList.length - 1 ? 'disabled' : ''}>Sau</button>
+      </div>
+      <button class="btn-g" id="btn-m-copy">Sao chép</button>`;
+
+    document.getElementById('btn-m-prev').onclick = () => { if (modalPos > 0) { modalPos--; drawModal(); } };
+    document.getElementById('btn-m-next').onclick = () => { if (modalPos < modalList.length - 1) { modalPos++; drawModal(); } };
+    document.getElementById('btn-m-copy').onclick = () => {
+      const text = doc.columns.map((c, idx) => (doc.rows[i][idx] ? `${c}: ${doc.rows[i][idx]}` : ''))
+        .filter(Boolean).concat(`Nguồn: ${doc.fileName}`).join('\n');
+      copyText(text);
+    };
   }
 
   function closeModal() {
     modal.hidden = true;
     document.body.style.overflow = '';
-    modalCtx = null;
   }
 
   modal.addEventListener('click', (e) => {
-    if (e.target.closest('[data-close]')) return closeModal();
-    if (e.target.closest('a[href^="#/file/"]')) return closeModal();
-    const m = e.target.closest('[data-m]');
-    if (!m || !modalCtx) return;
-    const act = m.dataset.m;
-    if (act === 'prev' && modalCtx.pos > 0) { modalCtx.pos--; drawRecord(); }
-    if (act === 'next' && modalCtx.pos < modalCtx.list.length - 1) { modalCtx.pos++; drawRecord(); }
-    if (act === 'empty') { modalCtx.showEmpty = m.checked; drawRecord(); }
-    if (act === 'copy') {
-      const { doc, i } = modalCtx.list[modalCtx.pos];
-      const text = doc.columns.map((c, idx) => (doc.rows[i][idx] ? `${c}: ${doc.rows[i][idx]}` : ''))
-        .filter(Boolean).concat(`Nguồn: ${doc.fileName}`).join('\n');
-      copyText(text);
-    }
+    if (e.target.closest('[data-close]')) closeModal();
   });
-
   document.addEventListener('keydown', (e) => {
-    if (modal.hidden || !modalCtx) return;
+    if (modal.hidden) return;
     if (e.key === 'Escape') closeModal();
-    if (e.key === 'ArrowLeft' && modalCtx.pos > 0) { modalCtx.pos--; drawRecord(); }
-    if (e.key === 'ArrowRight' && modalCtx.pos < modalCtx.list.length - 1) { modalCtx.pos++; drawRecord(); }
+    if (e.key === 'ArrowLeft' && modalPos > 0) { modalPos--; drawModal(); }
+    if (e.key === 'ArrowRight' && modalList && modalPos < modalList.length - 1) { modalPos++; drawModal(); }
   });
 
-  /* ------------------------------------------------------------ home view */
-  function groupStats() {
-    const map = new Map();
-    state.manifest.files.forEach((f) => map.set(f.group, (map.get(f.group) || 0) + f.count));
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi', { numeric: true }))
-      .map(([name, count]) => ({ name, count }));
-  }
-
-  function renderHome(params) {
-    const m = state.manifest;
-    const query = readQuery(params);
-    const group = params.get('g') || '';
-    state.lastHomeHash = location.hash || '#/';
-    document.title = 'Tra cứu dữ liệu văn bằng';
-
-    app.innerHTML = `
-      <section class="panel">
-        <div class="panel-title">
-          <h2>Tìm kiếm trong toàn bộ dữ liệu</h2>
-          <span class="sub">${fmtNum(m.totalRecords)} bản ghi trong ${fmtNum(m.totalFiles)} file Excel</span>
-        </div>
-        ${searchFormHTML({ columns: m.columns, withFile: true, query, groups: groupStats(), group })}
-      </section>
-      <section class="panel" id="area"></section>`;
-
-    const form = app.querySelector('.search-form');
-    bindSearchForm(form, m.columns, true, (q) => {
-      queryToParams(params, q);
-      params.delete('sort');
-      params.delete('dir');
-      replaceHash('/', params);
-      updateHome(params);
-    });
-    form.querySelector('[data-role=groups]').addEventListener('click', (e) => {
-      const chip = e.target.closest('[data-group]');
-      if (!chip) return;
-      form.querySelectorAll('[data-group]').forEach((c) => c.classList.toggle('active', c === chip));
-      chip.dataset.group ? params.set('g', chip.dataset.group) : params.delete('g');
-      params.delete('page');
-      replaceHash('/', params);
-      updateHome(params);
-    });
-
-    updateHome(params);
-    if (!query.conds.some((c) => c.q.trim())) form.querySelector('.cond.first input').focus();
-  }
-
-  function scopeFiles(params) {
-    const g = params.get('g') || '';
-    return state.manifest.files.filter((f) => !g || f.group === g);
-  }
-
-  async function updateHome(params) {
-    const area = document.getElementById('area');
-    if (!area) return;
-    const query = readQuery(params);
-    const seq = ++state.seq;
-    if (!compile(query).length) {
-      renderFileList(area, params);
-      return;
-    }
-
-    const entries = scopeFiles(params);
-    const needLoad = entries.some((e) => !state.docs.has(e.id));
-    if (needLoad) {
-      area.innerHTML = `<div class="loading-block"><span class="spinner"></span>
-        Đang tải dữ liệu <b data-role="p">0</b> / ${fmtNum(entries.length)} file… (chỉ tải lần đầu)
-        <div class="progress"><div></div></div></div>`;
-    }
-    const failed = await loadMany(entries, (done, total) => {
-      if (!needLoad || seq !== state.seq) return;
-      const p = area.querySelector('[data-role=p]');
-      if (p) {
-        p.textContent = fmtNum(done);
-        area.querySelector('.progress > div').style.width = `${(done / total) * 100}%`;
-      }
-    });
-    if (seq !== state.seq) return;
-
-    const docs = entries.map((e) => state.docs.get(e.id)).filter(Boolean);
-    const t0 = performance.now();
-    const results = searchDocs(docs, query);
-    const ms = Math.round(performance.now() - t0);
-
-    const extraCols = query.conds.map((c) => c.c)
-      .filter((c) => c !== ANY_COL && c !== FILE_COL && !MAIN_COLS.includes(c));
-    const cols = [{ key: '__idx', label: '#', cls: 'idx' }]
-      .concat([...new Set(MAIN_COLS.concat(extraCols))].map((c) => ({ key: c, label: c })))
-      .concat([{ key: GROUP_COL, label: 'Năm' }, { key: FILE_COL, label: 'File Excel' }]);
-
-    const fileCount = new Set(results.map((r) => r.doc.id)).size;
-    area.innerHTML = `
-      <div class="result-head">
-        <div class="result-count">Tìm thấy ${fmtNum(results.length)} bản ghi
-          <small>trong ${fmtNum(fileCount)} file - ${ms} ms${params.get('g') ? ` - năm ${esc(params.get('g'))}` : ''}</small></div>
-        <a class="btn btn-sm" href="#/" data-role="back">Quay lại danh sách file</a>
-      </div>
-      ${failed.length ? `<div class="error-box" style="margin-bottom:10px">Không tải được ${failed.length} file: ${failed.slice(0, 5).map((f) => esc(f.name)).join(', ')}${failed.length > 5 ? '...' : ''}</div>` : ''}
-      <div data-role="table"></div>`;
-    area.querySelector('[data-role=back]').addEventListener('click', () => { state.lastHomeHash = '#/'; });
-
-    renderTable(area.querySelector('[data-role=table]'), {
-      results, cols, params, path: '/', terms: termsFor(query), accent: query.accent, showFile: true,
-      emptyHTML: `<div class="empty">Không tìm thấy bản ghi nào phù hợp.<br>
-        Thử bỏ bớt điều kiện, chọn "Tất cả các cột" hoặc kiểm tra lại chính tả.</div>`,
-    });
-  }
-
-  function renderFileList(area, params) {
-    const fq = params.get('fq') || '';
-    const sort = params.get('fs') || 'group';
-    area.innerHTML = `
-      <div class="panel-title">
-        <h2>Danh sách file dữ liệu</h2>
-        <span class="sub" data-role="count"></span>
-      </div>
-      <div class="toolbar">
-        <input class="input" type="search" placeholder="Lọc theo tên file (vd. KT4A, Đà Nẵng, 2640...)" value="${esc(fq)}" data-role="fq">
-        <select class="select" data-role="fs" title="Sắp xếp">
-          <option value="group">Sắp xếp: theo năm</option>
-          <option value="name">Sắp xếp: theo tên file</option>
-          <option value="count">Sắp xếp: nhiều bản ghi nhất</option>
-        </select>
-      </div>
-      <div data-role="list"></div>`;
-    const fqInput = area.querySelector('[data-role=fq]');
-    const fsSelect = area.querySelector('[data-role=fs]');
-    fsSelect.value = sort;
-
-    const draw = () => {
-      const tokens = fold(fqInput.value).split(/\s+/).filter(Boolean);
-      const g = params.get('g') || '';
-      let files = state.manifest.files.filter((f) => (!g || f.group === g) && tokens.every((t) => f._fold.includes(t)));
-      const coll = new Intl.Collator('vi', { numeric: true });
-      if (fsSelect.value === 'name') files = files.slice().sort((a, b) => coll.compare(a.name, b.name));
-      else if (fsSelect.value === 'count') files = files.slice().sort((a, b) => b.count - a.count);
-      else files = files.slice().sort((a, b) => coll.compare(a.group, b.group) || coll.compare(a.name, b.name));
-
-      const total = files.reduce((s, f) => s + f.count, 0);
-      area.querySelector('[data-role=count]').textContent = `${fmtNum(files.length)} file - ${fmtNum(total)} bản ghi`;
-      const list = area.querySelector('[data-role=list]');
-      if (!files.length) {
-        list.innerHTML = '<div class="empty">Không có file nào khớp với bộ lọc.</div>';
-        return;
-      }
-      const card = (f) => `
-        <a class="file-card" href="#/file/${encodeURIComponent(f.id)}" title="${esc(f.source)}">
-          <span class="file-icon">XLS</span>
-          <span class="file-info">
-            <span class="file-name">${highlight(f.name, tokens, false)}</span>
-            <span class="file-meta"><span class="badge">${fmtNum(f.count)} bản ghi</span><span class="badge badge-gray">${esc(f.group)}</span></span>
-          </span>
-        </a>`;
-      if (fsSelect.value === 'group') {
-        const groups = new Map();
-        files.forEach((f) => { if (!groups.has(f.group)) groups.set(f.group, []); groups.get(f.group).push(f); });
-        list.innerHTML = [...groups.entries()].map(([gname, fs]) => `
-          <div class="group-head"><h3>${esc(gname)}</h3><span>${fmtNum(fs.length)} file - ${fmtNum(fs.reduce((s, f) => s + f.count, 0))} bản ghi</span></div>
-          <div class="file-grid">${fs.map(card).join('')}</div>`).join('');
-      } else {
-        list.innerHTML = `<div class="file-grid">${files.map(card).join('')}</div>`;
-      }
-    };
-
-    const save = () => {
-      fqInput.value.trim() ? params.set('fq', fqInput.value) : params.delete('fq');
-      fsSelect.value !== 'group' ? params.set('fs', fsSelect.value) : params.delete('fs');
-      replaceHash('/', params);
-    };
-    fqInput.addEventListener('input', debounce(() => { save(); draw(); }, 150));
-    fsSelect.addEventListener('change', () => { save(); draw(); });
-    draw();
-  }
-
-  /* ------------------------------------------------------------ file view */
-  async function renderFile(id, params) {
-    const entry = state.byId.get(id);
-    if (!entry) {
-      app.innerHTML = `<div class="panel empty">Không tìm thấy file dữ liệu này.<br><br>
-        <a class="btn" href="#/">Về danh sách file</a></div>`;
-      return;
-    }
-    document.title = `${entry.name} - Tra cứu dữ liệu văn bằng`;
-    app.innerHTML = `<div class="loading-block"><span class="spinner"></span> Đang tải ${esc(entry.fileName)}...</div>`;
-    let doc;
-    try {
-      doc = await loadDoc(entry);
-    } catch (err) {
-      app.innerHTML = `<div class="error-box"><h3>Không tải được file dữ liệu</h3>${esc(entry.path)} - ${esc(err.message)}</div>`;
-      return;
-    }
-    if (parseHash().path !== `/file/${id}`) return; // người dùng đã chuyển trang
-
-    const query = readQuery(params);
-    const nonEmpty = doc.columns.filter((c, idx) => doc.rows.some((r) => r[idx]));
-    const jsonUrl = DATA_DIR + entry.path;
-    const path = `/file/${id}`;
-
-    app.innerHTML = `
-      <div class="breadcrumb">
-        <a href="${esc(state.lastHomeHash)}">Danh sách file</a><span class="sep">/</span>
-        <span>${esc(doc.group)}</span><span class="sep">/</span><span>${esc(doc.fileName)}</span>
-      </div>
-      <section class="panel">
-        <div class="file-header">
-          <div>
-            <h1>${esc(doc.name)}</h1>
-            <div class="meta">
-              <span>Năm/thư mục: <b>${esc(doc.group)}</b></span>
-              <span>Số bản ghi: <b>${fmtNum(doc.rows.length)}</b></span>
-              <span>Sheet: <b>${esc(doc.sheet)}</b></span>
-              ${doc.title ? `<span>${esc(doc.title)}</span>` : ''}
-            </div>
-          </div>
-          <div class="actions">
-            <a class="btn btn-sm" href="${esc(jsonUrl)}" download="${esc(doc.name)}.json">Tải file JSON</a>
-          </div>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-title"><h2>Tìm trong file này</h2><span class="sub">Có thể tìm theo bất kỳ cột nào của file Excel</span></div>
-        ${searchFormHTML({ columns: nonEmpty, withFile: false, query })}
-      </section>
-      <section class="panel" id="area"></section>`;
-
-    const area = document.getElementById('area');
-    const draw = () => {
-      const q = readQuery(params);
-      const results = searchDocs([doc], q);
-      const has = compile(q).length > 0;
-      const cols = nonEmpty.map((c) => ({ key: c, label: c, cls: c === 'STT' ? 'idx' : '' }));
-      area.innerHTML = `
-        <div class="result-head">
-          <div class="result-count">${has ? `Tìm thấy ${fmtNum(results.length)} / ${fmtNum(doc.rows.length)} bản ghi` : `Toàn bộ ${fmtNum(doc.rows.length)} bản ghi`}
-            <small>- ${nonEmpty.length} cột có dữ liệu</small></div>
-        </div>
-        <div data-role="table"></div>`;
-      renderTable(area.querySelector('[data-role=table]'), {
-        results, cols, params, path, terms: termsFor(q), accent: q.accent, showFile: false,
-        emptyHTML: '<div class="empty">Không có bản ghi nào phù hợp trong file này.</div>',
-      });
-    };
-
-    bindSearchForm(app.querySelector('.search-form'), nonEmpty, false, (q) => {
-      queryToParams(params, q);
-      replaceHash(path, params);
-      draw();
-    });
-    draw();
-  }
-
-  /* ----------------------------------------------------------------- boot */
+  /* ------------------------------------------------------------- router */
   function route() {
     if (!modal.hidden) closeModal();
     const { path, params } = parseHash();
-    window.scrollTo(0, 0);
-    const fm = path.match(/^\/file\/(.+)$/);
-    if (fm) renderFile(decodeURIComponent(fm[1]), params);
-    else renderHome(params);
+    if (path === '/search') renderSearch(params);
+    else renderHome();
   }
 
-  function renderStats() {
-    const m = state.manifest;
-    document.getElementById('stats').innerHTML = `
-      <div class="stat"><b>${fmtNum(m.totalFiles)}</b><span>file Excel</span></div>
-      <div class="stat"><b>${fmtNum(m.totalRecords)}</b><span>bản ghi</span></div>
-      <div class="stat"><b>${esc(m.generatedAt || '')}</b><span>cập nhật dữ liệu</span></div>`;
-    document.getElementById('footer').textContent =
-      `Dữ liệu được tạo lúc ${m.generatedAt || '?'} từ ${fmtNum(m.totalFiles)} file Excel.`;
-  }
+  miniForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = miniInput.value.trim();
+    if (q) setHash('/search', new URLSearchParams({ q }));
+  });
+
+  bindAutocomplete(miniInput, miniSuggest, miniForm, (name) => {
+    setHash('/search', new URLSearchParams({ q: name }));
+  });
 
   async function boot() {
     try {
-      await loadManifest();
+      await Promise.all([loadManifest(), loadNames()]);
+      window.addEventListener('hashchange', route);
+      route();
     } catch (err) {
-      const isFile = location.protocol === 'file:';
-      app.innerHTML = `<div class="error-box">
-        <h3>Không đọc được dữ liệu (data/index.json)</h3>
-        ${isFile
-          ? `<p>Bạn đang mở trang bằng file <code>index.html</code> trực tiếp. Hãy đảm bảo đã chạy <code>build.bat</code> để tạo dữ liệu.</p>`
-          : `<p>Chưa có dữ liệu hoặc đường dẫn sai. Hãy chạy <code>build.bat</code> để tạo dữ liệu JSON từ file Excel.</p>`}
-        <p style="opacity:.7">Chi tiết: ${esc(err.message)}</p></div>`;
-      return;
+      app.innerHTML = `<div class="empty-state"><h3>Không đọc được dữ liệu</h3><p>${esc(err.message)}</p></div>`;
     }
-    renderStats();
-    window.addEventListener('hashchange', route);
-    route();
   }
 
   boot();

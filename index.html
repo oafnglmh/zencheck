@@ -3,35 +3,48 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tra cứu dữ liệu văn bằng</title>
+  <title>Tra cứu văn bằng - CCE</title>
+  <link rel="icon" type="image/png" href="assets/logo.png">
   <link rel="stylesheet" href="assets/css/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="container topbar-inner">
-      <a href="#/" class="brand">
-        <span class="brand-badge">CCE</span>
-        <span>
-          <strong>Tra cứu dữ liệu văn bằng</strong>
-          <small>Dữ liệu số hóa từ các file Excel</small>
-        </span>
+  <div class="app-layout">
+    <header class="app-header">
+      <a href="#/" class="header-brand" id="header-brand" hidden>
+        <img src="assets/logo.png" alt="CCE Logo" class="brand-img-sm">
+        <span class="brand-text">Tra cứu văn bằng</span>
       </a>
-      <div class="stats" id="stats"></div>
-    </div>
-  </header>
+      <div class="header-search" id="header-search" hidden>
+        <form class="mini-search-form" id="mini-search-form" autocomplete="off">
+          <div class="mini-input-wrap">
+            <input type="search" id="mini-search-input" placeholder="Nhập họ tên, số hiệu bằng, số định danh..." autocomplete="off">
+            <button type="submit" class="btn-search-icon" title="Tìm kiếm"></button>
+          </div>
+          <div class="suggest-box" id="mini-suggest-box" hidden></div>
+        </form>
+      </div>
+      <div class="header-right">
+      </div>
+    </header>
 
-  <main class="container" id="app">
-    <div class="loading-block"><span class="spinner"></span> Đang tải danh sách dữ liệu...</div>
-  </main>
+    <main class="app-main" id="app">
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <p>Đang chuẩn bị dữ liệu...</p>
+      </div>
+    </main>
 
-  <footer class="footer container" id="footer"></footer>
+    <footer class="app-footer">
+      <span>Trung tâm Đào tạo Thường xuyên - Đại học Đà Nẵng (CCE)</span>
+    </footer>
+  </div>
 
   <!-- Popup chi tiết bản ghi -->
   <div class="modal" id="modal" hidden>
     <div class="modal-backdrop" data-close></div>
     <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-head">
-        <h3 id="modal-title">Chi tiết</h3>
+        <h3 id="modal-title">Chi tiết bản ghi</h3>
         <button class="btn-close" data-close title="Đóng (Esc)"></button>
       </div>
       <div class="modal-body" id="modal-body"></div>
@@ -44,4 +57,3 @@
   <script src="assets/js/app.js"></script>
 </body>
 </html>
-
